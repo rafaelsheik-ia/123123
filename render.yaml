@@ -1,8 +1,8 @@
 # Arquivo: render.yaml
-# Versão final para deploy com PostgreSQL
+# Versão final CORRIGIDA para deploy com PostgreSQL
 
 services:
-  # Configuração do Serviço Web (sua aplicação Flask)
+  # Define apenas o Serviço Web (sua aplicação Flask)
   - type: web
     name: painel-backend   # Nome do seu serviço web
     env: python
@@ -12,19 +12,11 @@ services:
     healthCheckPath: /api/health
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.5  # Usando uma versão estável e recente do Python
+        value: 3.11.5
 
-      # A mágica acontece aqui:
-      # Esta variável de ambiente 'DATABASE_URL' será criada
-      # e seu valor será preenchido automaticamente com a URL
-      # interna do banco de dados chamado 'baccc'.
+      # Conecta-se ao banco de dados que JÁ EXISTE no Render.
       - key: DATABASE_URL
         fromDatabase:
-          name: baccc  # O nome do seu banco de dados PostgreSQL no Render
-          property: internalDatabaseUrl
-
-  # Configuração do Banco de Dados (apenas para referência, você já criou no painel)
-  - type: pserv
-    name: baccc  # O nome do seu banco de dados PostgreSQL
-    env: postgres
-    plan: free
+          name: baccc  # O nome do seu banco de dados PostgreSQL
+          # CORREÇÃO: A propriedade correta é 'connectionString'
+          property: connectionString
