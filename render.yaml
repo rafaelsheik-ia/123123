@@ -1,22 +1,31 @@
 # Arquivo: render.yaml
-# Versão final CORRIGIDA para deploy com PostgreSQL
 
 services:
-  # Define apenas o Serviço Web (sua aplicação Flask)
   - type: web
-    name: painel-backend   # Nome do seu serviço web
+    name: painel-backend
     env: python
     plan: free
+    # O Root Directory deve ser a raiz do projeto, não a pasta 'src'
+    # Se o Render estiver usando 'src' como raiz, o comando abaixo falhará.
+    # A melhor abordagem é garantir que o Root Directory esteja em branco no painel do Render.
+    # E que o main.py esteja na raiz do repositório.
+    
+    # Se o main.py estiver dentro de uma pasta 'src', o comando seria:
+    # startCommand: "gunicorn --chdir src main:app"
+    
+    # Mas vamos assumir que o main.py está na raiz e o problema é outro.
+    # O problema mais comum é a forma como o Gunicorn é chamado.
+    # Vamos usar uma forma mais robusta.
+    
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "gunicorn --bind 0.0.0.0:$PORT main:app"
+    # CORREÇÃO AQUI:
+    startCommand: "gunicorn main:app"
+    
     healthCheckPath: /api/health
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.5
-
-      # Conecta-se ao banco de dados que JÁ EXISTE no Render.
       - key: DATABASE_URL
         fromDatabase:
-          name: baccc  # O nome do seu banco de dados PostgreSQL
-          # CORREÇÃO: A propriedade correta é 'connectionString'
+          name: baccc
           property: connectionString
