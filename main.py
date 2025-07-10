@@ -79,4 +79,3 @@ def init_db_command():
 @app.route('/')
 def index():
     return "Servidor do Painel INFLUENCIANDO está no ar."
-
