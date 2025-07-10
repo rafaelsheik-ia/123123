@@ -1,8 +1,5 @@
-# O código de manipulação de 'sys.path' foi removido pois não é mais necessário
-# com o main.py na pasta raiz do projeto.
 import os
-
-from flask import Flask, send_from_directory
+from flask import Flask
 from flask_cors import CORS
 from src.models.user import db
 from src.routes.user import user_bp
@@ -11,94 +8,76 @@ from src.routes.orders import orders_bp
 from src.routes.admin import admin_bp
 from src.routes.payments import payments_bp
 
-app = Flask(__name__, static_folder=os.path.join(os.path.dirname(__file__), 'static'))
+# Cria a instância da aplicação Flask
+app = Flask(__name__)
 app.config['SECRET_KEY'] = 'asdf#FGSgvasgf$5$WGT'
 
-# Habilitar CORS
+# Habilita CORS para permitir requisições do seu frontend no Netlify
 CORS(app, supports_credentials=True)
 
-# Registrar blueprints
+# Registra todas as suas rotas (blueprints)
 app.register_blueprint(user_bp, url_prefix='/api')
 app.register_blueprint(services_bp, url_prefix='/api')
 app.register_blueprint(orders_bp, url_prefix='/api')
 app.register_blueprint(admin_bp, url_prefix='/api/admin')
 app.register_blueprint(payments_bp, url_prefix='/api/payments')
 
-# ====================================================================
-# ROTA DE HEALTH CHECK ADICIONADA PARA O RENDER.COM
-# ====================================================================
+# Rota de Health Check para o Render saber que a aplicação está viva
 @app.route('/api/health')
 def health_check():
-    # Esta rota simples retorna um status "ok" para que o Render
-    # saiba que a aplicação está funcionando corretamente.
     return {"status": "ok"}, 200
-# ====================================================================
 
-
-# ====================================================================
-# CONFIGURAÇÃO DO BANCO DE DADOS (PostgreSQL para Produção, SQLite para Local)
-# ====================================================================
-# Pega a URL do banco de dados da variável de ambiente 'DATABASE_URL' que o Render nos dará.
+# --- Configuração do Banco de Dados (PostgreSQL em Produção, SQLite para testes) ---
 DATABASE_URL = os.environ.get('DATABASE_URL')
-
 if DATABASE_URL:
-    # Se a variável de ambiente existir (estamos no Render), usa PostgreSQL.
-    # A linha abaixo corrige um pequeno problema de compatibilidade entre bibliotecas.
     app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 else:
-    # Se a variável não existir (estamos no nosso PC), usa um banco SQLite local.
-    # Agora que main.py está na raiz, o caminho para a pasta 'database' deve incluir 'src'.
+    # Fallback para um banco de dados local se não estiver no Render
     database_dir = os.path.join(os.path.dirname(__file__), 'src', 'database')
-    os.makedirs(database_dir, exist_ok=True) # Garante que o diretório exista
+    os.makedirs(database_dir, exist_ok=True)
     database_path = os.path.join(database_dir, 'app.db')
     app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{database_path}"
 
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db.init_app(app)
-# ====================================================================
 
-
-# Criar tabelas e configurações padrão dentro do contexto da aplicação
+# --- Inicialização do Banco de Dados e Configurações ---
 with app.app_context():
+    # Cria todas as tabelas do banco de dados se elas não existirem
     db.create_all()
     
-    # Criar configurações padrão se não existirem
     from src.models.user import AdminConfig
     
-    default_configs = {
-        'profit_margin': '20',  # 20% de margem de lucro padrão
-        'barato_api_key': '',
-        'mp_access_token': '',
-        'mp_public_key': '',
-        'mp_client_id': '',
-        'mp_client_secret': ''
+    # Mapeia as variáveis de ambiente que vamos configurar no Render
+    # para as chaves correspondentes no banco de dados.
+    env_configs = {
+        'barato_api_key': os.environ.get('BARATO_API_KEY'),
+        'mp_access_token': os.environ.get('MP_ACCESS_TOKEN'),
+        'mp_public_key': os.environ.get('MP_PUBLIC_KEY'),
+        'mp_client_id': os.environ.get('MP_CLIENT_ID'),
+        'mp_client_secret': os.environ.get('MP_CLIENT_SECRET'),
+        'profit_margin': os.environ.get('PROFIT_MARGIN', '20') # Usa '20' se a variável não for definida
     }
     
-    for key, default_value in default_configs.items():
-        existing_config = AdminConfig.query.filter_by(key=key).first()
-        if not existing_config:
-            config = AdminConfig(key=key, value=default_value)
-            db.session.add(config)
+    # Este loop garante que as configurações do Render sejam salvas no banco de dados
+    for key, value in env_configs.items():
+        # Só faz algo se a variável de ambiente tiver um valor
+        if value:
+            existing_config = AdminConfig.query.filter_by(key=key).first()
+            if existing_config:
+                # Se a configuração já existe, atualiza o valor
+                existing_config.value = value
+            else:
+                # Se não existe, cria uma nova
+                new_config = AdminConfig(key=key, value=value)
+                db.session.add(new_config)
     
+    # Salva todas as alterações no banco de dados
     db.session.commit()
 
-# As rotas abaixo servem para o frontend, mas como o frontend está no Netlify,
-# elas não serão muito usadas. Mantemos por segurança.
+# Rota genérica que não será usada em produção, mas é boa para testes
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def serve(path):
-    static_folder_path = app.static_folder
-    if static_folder_path is None:
-            return "Static folder not configured", 404
+    return "Backend do Painel está rodando. Acesse o frontend pelo Netlify."
 
-    if path != "" and os.path.exists(os.path.join(static_folder_path, path)):
-        return send_from_directory(static_folder_path, path)
-    else:
-        index_path = os.path.join(static_folder_path, 'index.html')
-        if os.path.exists(index_path):
-            return send_from_directory(static_folder_path, 'index.html')
-        else:
-            return "index.html not found", 404
-
-# O bloco if __name__ == '__main__': foi removido pois o Gunicorn (servidor de produção)
-# irá importar e rodar a variável 'app' diretamente.
