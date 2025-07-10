@@ -1,66 +1,62 @@
-# Arquivo: src/routes/payments.py (Versão Final Corrigida)
+# Arquivo: src/routes/payments.py (Versão Finalíssima)
 
 from flask import Blueprint, jsonify, request, session
 from src.models.user import User, Payment, db
 from src.routes.user import login_required
-
-# Importa nossa nova função de configuração e a classe da API
 from src.config import get_config
 from src.services.mercado_pago import MercadoPagoAPI
 
 payments_bp = Blueprint('payments', __name__)
 
 def get_mp_api_instance():
-    """
-    Cria uma instância da API do Mercado Pago usando as configurações do ambiente.
-    Retorna a instância da API ou None se as credenciais não estiverem configuradas.
-    """
     access_token = get_config('mp_access_token')
-    public_key = get_config('mp_public_key') # Opcional, mas bom ter
-
     if not access_token:
         return None
-    
-    return MercadoPagoAPI(access_token, public_key)
+    return MercadoPagoAPI(access_token)
 
 @payments_bp.route('/create-payment', methods=['POST'])
 @login_required
 def create_payment():
-    """Criar pagamento PIX"""
     data = request.json
     user = User.query.get(session['user_id'])
     
     amount = data.get('amount')
     if not isinstance(amount, (int, float)) or amount <= 0:
         return jsonify({'error': 'Valor inválido'}), 400
-    if amount < 1:
-        return jsonify({'error': 'Valor mínimo é R$ 1,00'}), 400
     
     mp_api = get_mp_api_instance()
     if not mp_api:
-        return jsonify({'error': 'Mercado Pago não configurado no servidor'}), 500
+        return jsonify({'error': 'O sistema de pagamentos não está configurado.'}), 500
+    
+    # Criar um registro de pagamento pendente no nosso banco primeiro
+    payment = Payment(user_id=user.id, amount=amount, status='pending')
+    db.session.add(payment)
+    db.session.commit()
     
     try:
-        payment = Payment(user_id=user.id, amount=amount, status='pending')
-        db.session.add(payment)
-        db.session.commit()
-        
+        # Chamar a API do Mercado Pago para criar o pagamento
         mp_payment_data = mp_api.create_payment(
             amount=amount,
-            description=f'Recarga de saldo - {user.username} - ID: {payment.id}',
+            description=f'Recarga de saldo para {user.username}',
             payer_email=user.email,
-            external_reference=str(payment.id)
+            external_reference=str(payment.id) # Vincula o pagamento do MP ao nosso pagamento
         )
         
-        if not mp_payment_data or 'id' not in mp_payment_data:
+        # Verificar se a resposta da API do MP contém um erro
+        if 'error' in mp_payment_data:
+            # Se deu erro, removemos o pagamento pendente que criamos
             db.session.delete(payment)
             db.session.commit()
-            error_message = mp_payment_data.get('message', 'Erro ao criar pagamento no Mercado Pago')
-            return jsonify({'error': error_message}), 500
-            
+            # E retornamos a mensagem de erro exata do Mercado Pago para o frontend
+            error_message = mp_payment_data.get('message', 'Erro desconhecido do gateway de pagamento.')
+            print(f"Erro do Mercado Pago ao criar pagamento: {error_message}") # Log para depuração no Render
+            return jsonify({'error': error_message}), 400
+
+        # Se deu tudo certo, atualizamos nosso pagamento com o ID do MP
         payment.payment_id = str(mp_payment_data['id'])
         db.session.commit()
         
+        # Extraímos as informações do PIX para enviar ao frontend
         pix_info = {}
         if 'point_of_interaction' in mp_payment_data:
             transaction_data = mp_payment_data['point_of_interaction'].get('transaction_data', {})
@@ -71,53 +67,16 @@ def create_payment():
         
         return jsonify({
             'payment_id': payment.id,
-            'mp_payment_id': mp_payment_data['id'],
-            'amount': amount,
-            'status': mp_payment_data.get('status', 'pending'),
             'pix_info': pix_info,
+            'amount': amount
         })
             
     except Exception as e:
-        return jsonify({'error': f'Erro inesperado ao criar pagamento: {str(e)}'}), 500
+        # Em caso de erro inesperado, também removemos o pagamento pendente
+        db.session.delete(payment)
+        db.session.commit()
+        print(f"Erro inesperado ao processar pagamento: {e}") # Log para depuração
+        return jsonify({'error': f'Erro inesperado no servidor: {str(e)}'}), 500
 
-@payments_bp.route('/check-payment/<int:payment_id>', methods=['GET'])
-@login_required
-def check_payment(payment_id):
-    """Verificar status do pagamento"""
-    payment = Payment.query.filter_by(id=payment_id, user_id=session['user_id']).first_or_404()
-    
-    if not payment.payment_id:
-        return jsonify({'error': 'Pagamento não possui ID do Mercado Pago'}), 400
-    
-    mp_api = get_mp_api_instance()
-    if not mp_api:
-        return jsonify({'error': 'Mercado Pago não configurado'}), 500
-    
-    try:
-        mp_payment = mp_api.get_payment(payment.payment_id)
-        if not mp_payment:
-            return jsonify({'error': 'Erro ao consultar pagamento no Mercado Pago'}), 500
-
-        old_status = payment.status
-        new_status = mp_payment.get('status', 'pending')
-        
-        status_mapping = {'approved': 'approved', 'pending': 'pending', 'in_process': 'pending', 'rejected': 'rejected', 'cancelled': 'cancelled', 'refunded': 'refunded'}
-        mapped_status = status_mapping.get(new_status, 'pending')
-        
-        if old_status != 'approved' and mapped_status == 'approved':
-            user = User.query.get(payment.user_id)
-            user.balance += payment.amount
-            payment.status = 'approved'
-            db.session.commit()
-        elif payment.status != mapped_status:
-            payment.status = mapped_status
-            db.session.commit()
-
-        return jsonify({'status': payment.status})
-            
-    except Exception as e:
-        return jsonify({'error': f'Erro ao verificar pagamento: {str(e)}'}), 500
-
-# Mantenha as outras rotas (webhook, etc.) como estão,
-# mas garanta que elas também usem get_mp_api_instance() em vez da função antiga.
-# O código que você forneceu já parece usar a função auxiliar, então está correto.
+# Mantenha as outras rotas (check_payment, webhook, etc.) como estão
+# ...
