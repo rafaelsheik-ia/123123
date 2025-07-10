@@ -1,174 +1,95 @@
-from flask import Blueprint, jsonify, request, session
-from src.models.user import Service, AdminConfig, db
-from src.services.barato_social import BaratoSocialAPI
+# Arquivo: src/routes/services.py (Versão Final Corrigida)
+
+from flask import Blueprint, jsonify
+from src.models.user import Service, db
 from src.routes.user import login_required, admin_required
 
-services_bp = Blueprint('services', __name__)
+# Importa nossa nova função de configuração e a classe da API
+from src.config import get_config
+from src.services.barato_social import BaratoSocialAPI
 
-def get_barato_api():
-    """Obter instância da API BaratoSocial"""
-    config = AdminConfig.query.filter_by(key='barato_api_key').first()
-    if not config or not config.value:
-        return None
-    return BaratoSocialAPI(config.value)
+services_bp = Blueprint('services', __name__)
 
 @services_bp.route('/services', methods=['GET'])
 @login_required
 def get_services():
-    """Listar serviços disponíveis"""
-    # Obter margem de lucro
-    profit_config = AdminConfig.query.filter_by(key='profit_margin').first()
-    profit_margin = float(profit_config.value) if profit_config and profit_config.value else 0
+    """
+    Lista os serviços disponíveis do banco de dados.
+    Se o banco estiver vazio, tenta sincronizar com a API primeiro.
+    """
+    # USA A NOVA FUNÇÃO get_config para a margem de lucro
+    profit_margin = float(get_config('profit_margin') or 0)
     
-    # Verificar se há serviços na base de dados
     services = Service.query.filter_by(is_active=True).all()
     
-    # Se não há serviços, tentar sincronizar automaticamente
+    # Se não há serviços no nosso banco, tenta uma sincronização automática
     if not services:
-        api = get_barato_api()
-        if api:
+        # USA A NOVA FUNÇÃO get_config para a chave da API
+        api_key = get_config('barato_api_key')
+        if api_key:
             try:
+                api = BaratoSocialAPI(api_key)
                 services_data = api.services()
-                if services_data:
-                    # Sincronizar serviços
+                if services_data and isinstance(services_data, list):
                     for service_data in services_data:
-                        new_service = Service(
-                            service_id=service_data['service'],
-                            name=service_data['name'],
-                            type=service_data['type'],
-                            rate=float(service_data['rate']),
-                            min=int(service_data['min']),
-                            max=int(service_data['max']),
-                            category=service_data.get('category', ''),
-                            description=service_data.get('description', '')
-                        )
-                        db.session.add(new_service)
-                    
+                        # Evita adicionar serviços duplicados
+                        exists = Service.query.filter_by(service_id=service_data['service']).first()
+                        if not exists:
+                            new_service = Service(
+                                service_id=service_data['service'],
+                                name=service_data['name'],
+                                type=service_data['type'],
+                                rate=float(service_data['rate']),
+                                min=int(service_data['min']),
+                                max=int(service_data['max']),
+                                category=service_data.get('category', ''),
+                                description=service_data.get('description', '')
+                            )
+                            db.session.add(new_service)
                     db.session.commit()
+                    # Recarrega os serviços do banco após a sincronização
                     services = Service.query.filter_by(is_active=True).all()
             except Exception as e:
-                print(f"Erro ao sincronizar serviços automaticamente: {e}")
-    
+                print(f"Falha na sincronização automática de serviços: {e}")
+                return jsonify({"error": "Não foi possível carregar os serviços do fornecedor."}), 500
+
+    # Retorna a lista de serviços com o preço final calculado
     return jsonify([service.to_dict(profit_margin) for service in services])
 
 @services_bp.route('/services/categories', methods=['GET'])
 @login_required
 def get_categories():
-    """Listar categorias de serviços"""
+    """Lista todas as categorias de serviços distintas."""
     categories = db.session.query(Service.category).filter(
         Service.is_active == True,
-        Service.category.isnot(None)
-    ).distinct().all()
+        Service.category != None,
+        Service.category != ''
+    ).distinct().order_by(Service.category).all()
     
-    return jsonify([cat[0] for cat in categories if cat[0]])
+    return jsonify([cat[0] for cat in categories])
 
-@services_bp.route('/services/sync', methods=['POST'])
-@admin_required
-def sync_services():
-    """Sincronizar serviços com BaratoSocial"""
-    api = get_barato_api()
-    if not api:
-        return jsonify({'error': 'Chave API do BaratoSocial não configurada'}), 400
-    
-    try:
-        # Obter serviços da API
-        services_data = api.services()
-        
-        if not services_data:
-            return jsonify({'error': 'Erro ao obter serviços da API'}), 500
-        
-        updated_count = 0
-        new_count = 0
-        
-        for service_data in services_data:
-            # Verificar se serviço já existe
-            existing_service = Service.query.filter_by(service_id=service_data['service']).first()
-            
-            if existing_service:
-                # Atualizar serviço existente
-                existing_service.name = service_data['name']
-                existing_service.type = service_data['type']
-                existing_service.rate = float(service_data['rate'])
-                existing_service.min = int(service_data['min'])
-                existing_service.max = int(service_data['max'])
-                existing_service.category = service_data.get('category', '')
-                existing_service.description = service_data.get('description', '')
-                updated_count += 1
-            else:
-                # Criar novo serviço
-                new_service = Service(
-                    service_id=service_data['service'],
-                    name=service_data['name'],
-                    type=service_data['type'],
-                    rate=float(service_data['rate']),
-                    min=int(service_data['min']),
-                    max=int(service_data['max']),
-                    category=service_data.get('category', ''),
-                    description=service_data.get('description', '')
-                )
-                db.session.add(new_service)
-                new_count += 1
-        
-        db.session.commit()
-        
-        return jsonify({
-            'message': 'Serviços sincronizados com sucesso',
-            'new_services': new_count,
-            'updated_services': updated_count
-        })
-        
-    except Exception as e:
-        return jsonify({'error': f'Erro ao sincronizar serviços: {str(e)}'}), 500
+# A rota de sincronização já estava no admin.py, que é o lugar mais correto para ela.
+# Se você quiser mantê-la aqui também, lembre-se de usar o get_config.
+# Por padrão, centralizar ações de admin no admin_bp é uma boa prática.
 
 @services_bp.route('/services/<int:service_id>', methods=['GET'])
 @login_required
-def get_service(service_id):
-    """Obter detalhes de um serviço"""
+def get_service_details(service_id):
+    """Obtém detalhes de um serviço específico."""
     service = Service.query.get_or_404(service_id)
-    
-    # Obter margem de lucro
-    profit_config = AdminConfig.query.filter_by(key='profit_margin').first()
-    profit_margin = float(profit_config.value) if profit_config and profit_config.value else 0
-    
+    profit_margin = float(get_config('profit_margin') or 0)
     return jsonify(service.to_dict(profit_margin))
 
 @services_bp.route('/services/<int:service_id>/toggle', methods=['POST'])
 @admin_required
-def toggle_service(service_id):
-    """Ativar/desativar serviço"""
+def toggle_service_status(service_id):
+    """Ativa ou desativa um serviço para os clientes."""
     service = Service.query.get_or_404(service_id)
     service.is_active = not service.is_active
     db.session.commit()
     
+    profit_margin = float(get_config('profit_margin') or 0)
     return jsonify({
-        'message': f'Serviço {"ativado" if service.is_active else "desativado"} com sucesso',
-        'service': service.to_dict()
+        'message': f'Serviço {"ativado" if service.is_active else "desativado"} com sucesso.',
+        'service': service.to_dict(profit_margin)
     })
-
-@services_bp.route('/services/search', methods=['GET'])
-@login_required
-def search_services():
-    """Buscar serviços"""
-    query = request.args.get('q', '')
-    category = request.args.get('category', '')
-    
-    # Obter margem de lucro
-    profit_config = AdminConfig.query.filter_by(key='profit_margin').first()
-    profit_margin = float(profit_config.value) if profit_config and profit_config.value else 0
-    
-    # Construir query
-    services_query = Service.query.filter_by(is_active=True)
-    
-    if query:
-        services_query = services_query.filter(
-            Service.name.contains(query) | 
-            Service.description.contains(query)
-        )
-    
-    if category:
-        services_query = services_query.filter_by(category=category)
-    
-    services = services_query.all()
-    
-    return jsonify([service.to_dict(profit_margin) for service in services])
-
